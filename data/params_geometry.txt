@@ -1,0 +1,7 @@
+Nspecies=3
+N=10000
+R=0.5
+dx=0.01
+alpha=0.01
+Nbatch=20
+Is_polar=0
