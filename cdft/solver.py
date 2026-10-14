@@ -282,3 +282,6 @@ class System:
             b += 1
             if tol is not None and maxdev < tol:
                 break
+            if math.isnan(maxdev):
+                break
+            

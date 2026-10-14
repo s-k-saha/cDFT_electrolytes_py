@@ -39,7 +39,13 @@ def poisson_factorize(h, Nt, bc):
 
 @njit(cache=True, nogil=True)
 def poisson_1D(h, Nt, psi_left, psi_right, phi, psi, bc, thomas):
-    """Finite-difference psi'' = phi with DD/DN/ND boundary conditions (Thomas algorithm)."""
+    """Finite-difference Poisson equation psi'' = -phi, DD/DN/ND boundary conditions (Thomas).
+
+    NOTE: the C code (utils.c) solves psi'' = +phi here, while its NN solver
+    (psi_calculator) solves psi'' = -phi. The wrong sign makes like charges
+    attract, and the Picard iteration then diverges as soon as
+    4*pi*lambdaB_eff*sum(q^2 rho)*(L/pi)^2*alpha > ~1.  Fixed here.
+    """
     M = Nt - 2
     if M <= 0:
         psi[0] = psi_left
@@ -51,7 +57,7 @@ def poisson_1D(h, Nt, psi_left, psi_right, phi, psi, bc, thomas):
     bprime = thomas[3]
     dprime = np.empty(M)
     for i in range(M):
-        dprime[i] = phi[i + 1]
+        dprime[i] = -phi[i + 1]
 
     if bc == 0:      # DD
         psi[0] = psi_left
@@ -61,10 +67,10 @@ def poisson_1D(h, Nt, psi_left, psi_right, phi, psi, bc, thomas):
     elif bc == 1:    # DN: psi'(right) = psi_right
         psi[0] = psi_left
         dprime[0] -= a[0] * psi_left
-        dprime[M - 1] = phi[Nt - 2] - psi_right / h
+        dprime[M - 1] = -phi[Nt - 2] - psi_right / h
     elif bc == 2:    # ND: psi'(left) = psi_left
         psi[Nt - 1] = psi_right
-        dprime[0] = phi[1] + psi_left / h
+        dprime[0] = -phi[1] + psi_left / h
         dprime[M - 1] -= c[M - 1] * psi_right
     else:
         return

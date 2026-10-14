@@ -33,7 +33,7 @@ def test_poisson_against_dense_solve():
     for bc, (L, R) in {0: (0.3, -0.1), 1: (0.3, 0.05), 2: (0.05, -0.1)}.items():
         psi = np.zeros(Nt)
         poisson_1D(h, Nt, L, R, phi, psi, bc, poisson_factorize(h, Nt, bc))
-        assert np.allclose(np.diff(psi, 2)[1:-1] / h**2, phi[2:-2], atol=1e-8)
+        assert np.allclose(np.diff(psi, 2)[1:-1] / h**2, -phi[2:-2], atol=1e-8)
         if bc in (0, 1):
             assert psi[0] == L
         if bc in (0, 2):
