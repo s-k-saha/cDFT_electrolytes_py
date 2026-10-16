@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .constants import SIGMA_D, ELECTRON_CHARGE, KB, EPSILON_0
+from .constants import SIGMA_D, KB
 
 _INT = re.compile(r"\s*[+-]?\d+")
 _FLOAT = re.compile(r"\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
@@ -58,8 +58,6 @@ class Params:
     K: int = 0
     Lx: float = 0.0
     iend: int = 0
-    psi_factor: float = 0.0
-    E_factor: float = 0.0
     # system
     T: float = 300.0
     kBT: float = KB * 300.0
@@ -71,8 +69,9 @@ class Params:
     q: np.ndarray = None
     BC: str = ""
     lambdaB: float = 0.0
-    Vq_L: float = 0.0           # already divided by psi_factor
-    Vq_R: float = 0.0           # already divided by psi_factor
+    Vq_L: float = 0.0           # boundary value at the left end (V, or V/sigma if Neumann)
+    Vq_R: float = 0.0           # boundary value at the right end
+    alpha_ES: float = 0.01      # mixing parameter of the electrostatic potential
     p: float = 0.0
     h_target: float = 0.0
     LJ_exists: bool = False
@@ -82,7 +81,7 @@ class Params:
     rc: float = 0.0
     rmin: float = 0.0
     NiLJ: int = 0
-    # ES grid size (iend+1 at the moment the q line was read)
+    # ES grid: points NiR..iend-1 (iend as it is when the q line is read)
     N_ES: int = 0
 
 
@@ -103,8 +102,6 @@ def read_params_geometry(path, P=None):
     P.K = P.N // 2 + 1
     P.Lx = P.dx * P.N
     P.iend = P.N - 3 * P.NiR
-    P.psi_factor = ELECTRON_CHARGE / (EPSILON_0 * P.sigma_nm)
-    P.E_factor = P.psi_factor / P.sigma_nm
     return P
 
 
@@ -143,7 +140,7 @@ def read_params_system(path, P):
             if line.startswith("q"):
                 P.ES_exists = True
                 P.lambdaB = 0.0
-                P.N_ES = P.iend + 1
+                P.N_ES = P.iend - P.NiR
                 P.q = _scan_list(line, ns)
                 continue
             if line.startswith("BC="):
@@ -158,11 +155,15 @@ def read_params_system(path, P):
                 continue
             v = _scan(line, "Vq_L=", float)
             if v is not None:
-                P.Vq_L = v / P.psi_factor
+                P.Vq_L = v
                 continue
             v = _scan(line, "Vq_R=", float)
             if v is not None:
-                P.Vq_R = v / P.psi_factor
+                P.Vq_R = v
+                continue
+            v = _scan(line, "alpha_ES=", float)
+            if v is not None:
+                P.alpha_ES = v
                 continue
             v = _scan(line, "p=", float)
             if v is not None:
@@ -178,8 +179,8 @@ def read_params_system(path, P):
         P.eps = np.zeros((ns, ns))
     if P.Is_polar and not P.ES_exists:
         raise ValueError("Is_polar=1 requires charges (a 'q=' line) in params_system.txt")
-    if P.ES_exists and P.BC not in ("DD", "DN", "ND", "NN"):
-        raise ValueError("unknown BC type %r" % P.BC)
+    if P.ES_exists and P.BC not in ("DD", "DN", "ND"):
+        raise ValueError("unsupported BC type %r (use DD, DN or ND)" % P.BC)
     return P
 
 

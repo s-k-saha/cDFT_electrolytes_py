@@ -1,13 +1,15 @@
 # Classical DFT solver (Python)
 
-Python/numba port of the C solver in `../codebase_c`. It computes
+Python/numba port of the C solver (`../codebase_c`, with the electrostatics
+and polar-solvent part taken from `../codebase_c_2`). It computes
 equilibrium density profiles of **n interacting species** in a planar (1D)
 geometry with:
 
 1. Rosenfeld FMT for hard spheres
 2. Lennard-Jones attraction (WCA split, `r_c = 2.5σ`, mean-field/RPA)
-3. Mean-field electrostatics (Poisson equation, DD/DN/ND/NN boundary conditions),
-   optionally with a polar (Langevin-dipole) solvent
+3. Mean-field electrostatics: Poisson equation psi'' = -(rho_q - P')/eps0 with
+   DD/DN/ND boundary conditions, psi in volts, optionally with a polar
+   (Langevin-dipole) solvent as species 0
 4. Optional liquid–gas coexistence at fixed adsorption (`h_target`)
 
 See `../codebase_c/theory.pdf` for the theory, and `../codebase_c/README.md`
@@ -27,6 +29,7 @@ python run.py --data-dir /path/to/case       # params read from and output writt
 python run.py --max-batches 500              # stop after 500 x Nbatch iterations
 python run.py --tol 1e-8                     # stop when max(dev) < 1e-8
 python run.py --workers 4                    # multithreaded FFTs (only helps for N >~ 50000)
+python run.py --smooth-P                     # 3-point smoothing of P before it enters Poisson (smooth_P_flag in C)
 ```
 
 The first run compiles the numba kernels, which takes a few seconds. They are
@@ -41,13 +44,32 @@ s.run(max_batches=100)
 s.rho, s.c1, s.mu        # (Nspecies, N) profiles, bulk chemical potentials
 ```
 
+## Electrostatics (as in `codebase_c_2`)
+
+* Extra parameter in `params_system.txt`: `alpha_ES` (default 0.01), the
+  mixing parameter of the potential psi (and of the field E when polar).
+* Stability: the Picard iteration for the slowest electrostatic mode of the box
+  is stable only if `alpha * alpha_ES * (L / (pi*lambda_D))^2 < ~4`, where
+  lambda_D is the bare (vacuum) Debye length. This limit gets stricter as L^2,
+  so a 10x longer box needs a ~100x smaller `alpha * alpha_ES`. The code checks
+  this at startup and prints the largest safe `alpha_ES`.
+* `Vq_L`, `Vq_R` are in volts (Dirichlet) or V/sigma (Neumann). `NN` is not
+  supported because the Poisson problem is singular.
+* psi, phi, P and E live on the grid points `NiR .. iend-1`.
+* Coupling: `c1_i -= q_i e psi / kBT`. With a polar solvent, P = p rho_0 L(p p_d E/kBT)
+  and the orientational ideal term is added to species 0.
+* Initial guess: linearised Debye-Hueckel profiles for the ions (species >= 1)
+  and for psi. The solvent (species 0) starts from Boltzmann in the wall
+  potential.
+
 ## Output
 
-The output file name and format are **the same as the C code's**
-(`rho1Ddx...dat`, columns `i x rho_1 c1_1 ... [psi phi] [P E]`, same footer).
-Restart files are interchangeable: if the output file exists, the profiles are
-read from it and the iteration continues. This works for files written by
-either implementation.
+The output file name and format are the same as `codebase_c_2`'s
+(`rho1Ddx...dat` with `rhob` printed to 12 decimals; columns
+`i x rho_1 c1_1 ... [psi rho_q] [P E]`; footer with concentrations, Debye
+length, mu, eps, eps_r and dev). Restart files are interchangeable with
+`codebase_c_2`: if the output file exists, rho (and psi) are read from it and
+the iteration continues.
 
 ## Layout
 
@@ -86,21 +108,38 @@ The Python times include about 0.2 s of one-time loading of the cached kernels.
 
 ## Validation against the C code
 
-The two codes were run side by side on these cases: the shipped parameters
-(LJ + LG), ES with DD/DN/ND/NN boundary conditions, a `q` line read before the
-`eps` line, a polar solvent with NN and with DD, a single hard-sphere species,
-and a restart from a C-written file. In every case the output files agree to
-within 1 in the last printed (12th) decimal. The remaining differences are
-floating-point round-off from summing the convolutions in a different order.
+The FMT, LJ and liquid-gas parts were checked against `codebase_c`, and the
+electrostatics against `codebase_c_2`, by running the codes side by side:
+
+* non-polar ES with DD, DN and ND, polar with ND, and a restart from a
+  C_2-written file: agree within 1 in the last printed (12th) decimal;
+* polar with DD and DN (with and without `--smooth-P`): densities agree to
+  1e-12. P and E differ at the ~1e-8 to 1e-6 level of their scale. C_2
+  differs from itself by the same amount when only its floating-point
+  rounding changes (`-mno-fma`). E is a numerical derivative of an
+  ill-conditioned Poisson solution (condition number ~(N/pi)^2), so
+  round-off is amplified. This also sets the floor (~1e-10) at which the P
+  residual `dev[Nspecies]` stops decreasing.
+
+Speed: on the polar 3-species case (N=10^4, 2000 iterations) C_2 takes 5.9 s
+and Python 2.5 s.
 
 ## Differences from the C code
 
 * Input and output live in `--data-dir` (default `./data`) instead of the path
   `../data` relative to the executable.
 * `--max-batches` / `--tol` stopping criteria were added. Without them the run
-  is endless, as in C.
+  is endless, as in C. The run also stops if dev becomes NaN.
 * The reported `time` is wall-clock time. C used CPU time (`clock()`).
-* A missing `T=` line means T = 300 K. In C it left `kBT = 0`, which gives
-  division by zero.
-* `Is_polar=1` without a `q=` line, or an unknown `BC`, now stops with an
-  error. In C these crashed or silently produced garbage.
+* A missing `T=` line means T = 300 K. In C it left `kBT = 0`.
+* `init_psi` in C_2 runs while the `q=` line is being parsed, before `Vq_L`
+  is read, and mixes units (x in sigma, Debye length in m). So C_2
+  effectively starts from psi = 0. Here psi starts from the intended
+  Debye-Hueckel profile, which changes only the initial guess.
+* The Debye length uses |q_1|; C_2 uses q_1, which breaks the initial guess
+  if species 1 is an anion.
+* Polar + liquid-gas: C_2 updates `P[i]` instead of `P[i-NiR]` in that branch
+  (out-of-bounds write); fixed here.
+* Without charges, C_2 crashes when writing the Debye length. Here that footer
+  line is simply omitted. `Is_polar=1` without a `q=` line, or BC = NN or an
+  unknown BC, stops with an error.

@@ -21,7 +21,7 @@ def test_fast_formatter_matches_printf():
     ])
     v = v[np.abs(v) < 4500]
     vals = v[: len(v) // 3 * 3].reshape(-1, 3)
-    out, ok = _format_table(vals, True)
+    out, ok = _format_table(vals, np.array([6, 12, 12], dtype=np.int64))
     ref = "".join("%d %f %.12f %.12f \n" % ((i,) + tuple(r)) for i, r in enumerate(vals))
     assert ok and out.tobytes().decode() == ref
 
@@ -30,14 +30,24 @@ def test_poisson_against_dense_solve():
     h, Nt = 0.01, 400
     x = h * np.arange(Nt)
     phi = np.sin(3 * x) * np.exp(-x)
+    P = np.cos(2 * x)
+    dummy = np.zeros(Nt)
     for bc, (L, R) in {0: (0.3, -0.1), 1: (0.3, 0.05), 2: (0.05, -0.1)}.items():
+        th = poisson_factorize(h, Nt, bc)
         psi = np.zeros(Nt)
-        poisson_1D(h, Nt, L, R, phi, psi, bc, poisson_factorize(h, Nt, bc))
-        assert np.allclose(np.diff(psi, 2)[1:-1] / h**2, -phi[2:-2], atol=1e-8)
+        poisson_1D(h, Nt, L, R, phi, psi, bc, th, False, dummy, 0.0, dummy, 1.0)
+        assert np.allclose(np.diff(psi, 2)[1:-1] / h**2, phi[2:-2], atol=1e-8)
         if bc in (0, 1):
             assert psi[0] == L
         if bc in (0, 2):
             assert psi[-1] == R
+        # with polarisation: psi'' = phi + Pf * P', and E = -psi'/sigma
+        Pf, sig = 0.7, 2.0
+        E = np.zeros(Nt)
+        poisson_1D(h, Nt, L, R, phi, psi, bc, th, True, P, Pf, E, sig)
+        dP = (P[2:] - P[:-2]) / (2 * h)
+        assert np.allclose(np.diff(psi, 2) / h**2, (phi + 0 * P)[1:-1] + Pf * dP, atol=1e-8)
+        assert np.allclose(E[1:-1], -(psi[2:] - psi[:-2]) / (2 * h * sig))
 
 
 def test_bulk_fluid_is_a_fixed_point(tmp_path):

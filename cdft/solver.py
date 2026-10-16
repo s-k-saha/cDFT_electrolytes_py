@@ -76,7 +76,7 @@ def c1_hat(D, W, Uhat, eps, RH, use_lj, out):
 
 @njit(cache=True, nogil=True)
 def picard_update(rho, rhonew, c1, Vext, rhob, c1_bulk, mu, iend, NiR, alpha, dx,
-                  LG, rhobL, rhobG, h_target, is_polar, P, Pnew, E_exec, p, L_factor, dev):
+                  LG, rhobL, rhobG, h_target, is_polar, P, Pnew, E_exec, p, p_d, L_factor, dev):
     Ns = rho.shape[0]
     if not LG:
         for j in range(Ns):
@@ -88,8 +88,10 @@ def picard_update(rho, rhonew, c1, Vext, rhob, c1_bulk, mu, iend, NiR, alpha, dx
                 rhonew[j, i] = math.exp(-Vext[j, i] + c1[j, i] + mu[j])
 
     if is_polar:
-        for i in range(iend):
-            Pnew[i] = p * rho[0, i] * langevin(p * E_exec[i] * L_factor)
+        # polarisation of the dipolar solvent (species 0) in the local field
+        for i in range(NiR, iend):
+            temp = p * p_d * E_exec[i - NiR] * L_factor
+            Pnew[i - NiR] = p * rho[0, i] * langevin(temp)
 
     if not LG:
         for j in range(Ns):
@@ -97,7 +99,12 @@ def picard_update(rho, rhonew, c1, Vext, rhob, c1_bulk, mu, iend, NiR, alpha, dx
             for i in range(iend):
                 d += math.fabs(rhonew[j, i] - rho[j, i])
             dev[j] = d * dx
-        for i in range(iend):
+        if is_polar:
+            d = 0.
+            for i in range(P.shape[0]):
+                d += math.fabs(Pnew[i] - P[i]) * dx
+            dev[Ns] = d
+        for i in range(NiR, iend):
             for j in range(Ns):
                 rho[j, i] = (1 - alpha) * rho[j, i] + alpha * rhonew[j, i]
     else:
@@ -118,14 +125,15 @@ def picard_update(rho, rhonew, c1, Vext, rhob, c1_bulk, mu, iend, NiR, alpha, dx
 
     if is_polar:
         for i in range(NiR, iend):
-            P[i] = (1 - alpha) * P[i] + alpha * Pnew[i]
+            P[i - NiR] = (1 - alpha) * P[i - NiR] + alpha * Pnew[i - NiR]
 
 
 # ---------------------------------------------------------------------------
 class System:
-    def __init__(self, data_dir, workers=1, verbose=True):
+    def __init__(self, data_dir, workers=1, smooth_P=False, verbose=True):
         self.data_dir = data_dir
         self.workers = workers
+        self.smooth_P = smooth_P  # smooth P before it enters Poisson (smooth_P_flag in C)
         P = self.P = read_params(data_dir)
         Ns, N, K = P.Nspecies, P.N, P.K
 
@@ -133,7 +141,7 @@ class System:
         self.rho = np.zeros((Ns, N))
         self.rhonew = np.zeros((Ns, N))
         self.c1 = np.zeros((Ns, N))
-        self.dev = np.zeros(Ns)
+        self.dev = np.zeros(Ns + 1 if P.Is_polar else Ns)  # last entry: P(x)
         self.count_iter = 0
 
         # work buffers
@@ -151,19 +159,25 @@ class System:
         self.W = fmt.fmt_omegas(P.R, P.Lx, K)
         self.Uhat = lj.U_filter_fft(P) if P.LJ_exists else np.zeros(K, dtype=np.complex128)
 
-        # electrostatics / polarisation
+        # electrostatics / polarisation, all on the ES grid NiR..iend-1
         nES = max(P.N_ES, 1)
         self.phi = np.zeros(nES)
         self.psi = np.zeros(nES)
-        self.Pol = np.zeros(N)
-        self.Pnew = np.zeros(N)
-        self.E_exec = np.zeros(N)
+        self.psi_tmp = np.zeros(nES)
+        self.Pol = np.zeros(nES)
+        self.Pnew = np.zeros(nES)
+        self.P_smooth = np.zeros(nES)
+        self.E_exec = np.zeros(nES)
+        self.E_tmp = np.zeros(nES)
         self.q = P.q if P.ES_exists else np.zeros(Ns)
         self.bc = BC_CODES.get(P.BC, 0)
         self.thomas = poisson_factorize(P.dx, max(P.N_ES, 3), self.bc)
-        self.c1_factor = (ELECTRON_CHARGE * ELECTRON_CHARGE) * (1. / (P.sigma_nm * EPSILON_0 * P.kBT))
-        self.P_factor = P_D / (P.sigma_nm * ELECTRON_CHARGE)
-        self.L_factor = (P_D * ELECTRON_CHARGE) / (P.sigma_nm * P.sigma_nm * P.kBT * EPSILON_0)
+        self.phi_factor = -ELECTRON_CHARGE / P.sigma_nm / EPSILON_0
+        self.P_factor = P_D / P.sigma_nm / P.sigma_nm / EPSILON_0
+        self.e_kBT = ELECTRON_CHARGE / P.kBT
+        self.L_factor = 1. / P.kBT
+        if P.ES_exists:
+            es.init_psi(P, self.psi)
 
         self.rhobL = P.rhobL if P.LG_exists else np.zeros(Ns)
         self.rhobG = P.rhobG if P.LG_exists else np.zeros(Ns)
@@ -179,7 +193,8 @@ class System:
         self.c1_bulk = -self.mu + np.log(P.rhob)
 
         self.outfname = os.path.join(data_dir, io.create_outfname(P))
-        found, cnt = io.read_restart(self.outfname, self.rho, P.N)
+        found, cnt = io.read_restart(self.outfname, self.rho, P.N,
+                                     self.psi if P.ES_exists else None, P.NiR, P.iend)
         if verbose:
             print("ouput file found,reading from it" if found else "no ouput file found")
         if cnt is not None:
@@ -199,8 +214,17 @@ class System:
         P = self.P
         rho = self.rho
         rho[:, :P.NiR] = 0.
-        if not P.LG_exists:
+        if not P.LG_exists and not P.ES_exists:
             rho[:, P.NiR:] = P.rhob[:, None] * np.exp(-self.Vext[:, P.NiR:])
+        elif not P.LG_exists:
+            # solvent (species 0): Boltzmann in the wall potential;
+            # ions: linearised Debye-Hueckel response to the wall potential Vq_L
+            l_deb = es.debye_length(P)
+            x = P.dx * np.arange(0, P.N - P.NiR) * P.sigma_nm
+            decay = np.exp(-x / l_deb)
+            for j in range(1, P.Nspecies):
+                rho[j, P.NiR:] = P.rhob[j] * (1 - P.q[j] * self.e_kBT * P.Vq_L * decay)
+            rho[0, P.NiR:] = P.rhob[0] * np.exp(-self.Vext[0, P.NiR:])
         else:
             hN = int(P.h_target / P.dx)
             rho[:, P.NiR:hN + P.NiR] = P.rhobL[:, None]
@@ -247,17 +271,32 @@ class System:
         self._irfft(self.c1h, c1)
 
         if P.ES_exists:
-            es.add_c1_ES(rho, c1, self.q, P.lambdaB, P.dx, P.N_ES, P.Vq_L, P.Vq_R,
-                         self.bc, P.Is_polar, self.Pol, self.E_exec, self.phi, self.psi,
-                         self.c1_factor, self.P_factor, P.p, P.NiR, P.iend, self.thomas)
+            es.add_c1_ES(rho, c1, self.q, P.dx, P.N_ES, P.Vq_L, P.Vq_R, self.bc, self.thomas,
+                         P.Is_polar, self.smooth_P, self.Pol, self.P_smooth, self.E_exec,
+                         self.E_tmp, self.phi, self.psi, self.psi_tmp, P.alpha_ES,
+                         self.phi_factor, self.P_factor, P.sigma_nm, self.e_kBT, P.p,
+                         P.NiR, P.iend)
 
         picard_update(rho, self.rhonew, c1, self.Vext, P.rhob, self.c1_bulk, self.mu,
                       P.iend, P.NiR, P.alpha, P.dx, P.LG_exists, self.rhobL, self.rhobG,
-                      P.h_target, P.Is_polar, self.Pol, self.Pnew, self.E_exec, P.p,
+                      P.h_target, P.Is_polar, self.Pol, self.Pnew, self.E_exec, P.p, P_D,
                       self.L_factor, self.dev)
         self.count_iter += 1
 
     # -- driver ------------------------------------------------------------
+    def print_sys_params(self):
+        P = self.P
+        if P.ES_exists:
+            print("Debye length = %f nm" % (es.debye_length(P) * 1e9))
+            g, aes_max = es.mixing_gain(P)
+            if g > 3.0:
+                print("WARNING: alpha*alpha_ES*(L/(pi*lambda_D))^2 = %.3g > ~4 is the stability limit "
+                      "of the Picard iteration for this box; expect divergence. "
+                      "Use alpha_ES < %.3g (e.g. %.2g)." % (g, aes_max, 0.3 * aes_max))
+        fact = 1. / (6.022e23 * P.sigma_nm ** 3 * 1000)
+        for i in range(P.Nspecies):
+            print("conc. of species %d = %f M" % (i + 1, P.rhob[i] * fact))
+
     def write(self, elapsed):
         io.write_rho(self, elapsed)
 
@@ -268,6 +307,8 @@ class System:
         (stop when max(dev) < tol) is given.
         """
         P = self.P
+        if verbose:
+            self.print_sys_params()
         start = time.perf_counter()
         b = 0
         while max_batches is None or b < max_batches:
@@ -277,11 +318,10 @@ class System:
             self.write(elapsed)
             maxdev = self.dev.max()
             if verbose:
-                print("%d x %d batches; time: %f s; max dev: %f"
+                print("%d x %d batches; time: %f s; max dev: %.12f"
                       % (self.count_iter // P.Nbatch, P.Nbatch, elapsed, maxdev), flush=True)
             b += 1
             if tol is not None and maxdev < tol:
                 break
             if math.isnan(maxdev):
                 break
-            

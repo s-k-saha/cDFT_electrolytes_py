@@ -10,6 +10,8 @@ import re
 import numpy as np
 from numba import njit
 
+from .es import debye_length
+
 # ---------------------------------------------------------------------------
 # Fast, exactly-rounded "%.<d>f" formatting (identical output to printf).
 #
@@ -76,36 +78,30 @@ def _put_fixed(buf, pos, x, ndec, scale, ipow):
 
 
 @njit(cache=True)
-def _format_table(vals, last_sep):
-    """Rows of "%d %f " + "%.12f %.12f ..." ; returns (bytes, ok)."""
+def _format_table(vals, decs):
+    """Rows "<i> <v0> <v1> ... \n" with v_c printed as "%.<decs[c]>f"; returns (bytes, ok)."""
     N, ncol = vals.shape
     buf = np.empty(N * (ncol * 26 + 32), np.uint8)
     pos = 0
     for i in range(N):
         pos = _put_uint(buf, pos, i, 1)
-        buf[pos] = 32
-        pos += 1
-        pos = _put_fixed(buf, pos, vals[i, 0], 6, 1e6, 1000000)
-        if pos < 0:
-            return buf[:0], False
-        for c in range(1, ncol):
+        for c in range(ncol):
             buf[pos] = 32
             pos += 1
-            pos = _put_fixed(buf, pos, vals[i, c], 12, 1e12, 1000000000000)
+            d = decs[c]
+            pos = _put_fixed(buf, pos, vals[i, c], d, 10.0 ** d, np.int64(10) ** d)
             if pos < 0:
                 return buf[:0], False
-        if last_sep:
-            buf[pos] = 32
-            pos += 1
-        buf[pos] = 10
-        pos += 1
+        buf[pos] = 32
+        buf[pos + 1] = 10
+        pos += 2
     return buf[:pos], True
 
 
 def create_outfname(P):
     s = "rho1Ddx%fL%f" % (P.dx, P.Lx)
     for i in range(P.Nspecies):
-        s += "rhob%d_%f" % (i + 1, P.rhob[i])
+        s += "rhob%d_%.12f" % (i + 1, P.rhob[i])
     for i in range(P.Nspecies):
         s += "ew%d_%f" % (i + 1, P.ew[i])
     if P.ES_exists:
@@ -129,8 +125,11 @@ def create_outfname(P):
 _CYCLES = re.compile(r"(-?\d+) x (-?\d+) cycles time:\s*\S+ s")
 
 
-def read_restart(fname, rho, N):
-    """Load rho from an existing output file. Returns (found, ncycles or None)."""
+def read_restart(fname, rho, N, psi=None, NiR=0, iend=0):
+    """Load rho (and psi, if given) from an existing output file.
+
+    Returns (found, ncycles or None).
+    """
     if not os.path.exists(fname):
         return False, None
     Ns = rho.shape[0]
@@ -147,6 +146,8 @@ def read_restart(fname, rho, N):
             i = int(tok[0])
             for s in range(Ns):
                 rho[s, i] = float(tok[2 + 2 * s])
+            if psi is not None and NiR <= i < iend and len(tok) > 2 + 2 * Ns:
+                psi[i - NiR] = float(tok[2 + 2 * Ns])
         for line in lines:
             m = _CYCLES.match(line)
             if m:
@@ -156,43 +157,48 @@ def read_restart(fname, rho, N):
 
 def write_rho(sys, elapsed):
     P = sys.P
-    N, Ns, iend = P.N, P.Nspecies, P.iend
-    cols = [np.arange(N), P.dx * np.arange(N)]
-    fmt = "%d %f "
+    N, Ns, NiR, iend = P.N, P.Nspecies, P.NiR, P.iend
+    cols = [P.dx * np.arange(N)]
+    decs = [6]
     for j in range(Ns):
         cols += [sys.rho[j], sys.c1[j]]
-        fmt += "%.12f %.12f "
+        decs += [12, 6]
     if P.ES_exists:
         psi = np.full(N, P.Vq_R)
-        phi = np.zeros(N)
-        psi[:iend + 1] = sys.psi[:iend + 1] * P.psi_factor
-        phi[:iend + 1] = sys.phi[:iend + 1]
-        cols += [psi, phi]
-        fmt += "%.12f %.12f "
+        psi[:NiR] = P.Vq_L
+        psi[NiR:iend] = sys.psi[:iend - NiR]
+        rhoq = np.zeros(N)  # charge density sum_j q_j rho_j
+        rhoq[NiR:iend] = sys.phi[:iend - NiR] / sys.phi_factor
+        cols += [psi, rhoq]
+        decs += [12, 12]
     if P.Is_polar:
         Pc = np.zeros(N)
         Ec = np.zeros(N)
-        Pc[:iend + 1] = sys.Pol[:iend + 1]
-        Ec[:iend + 1] = sys.E_exec[:iend + 1] * P.E_factor
+        Pc[NiR:iend] = sys.Pol[:iend - NiR]
+        Ec[NiR:iend] = sys.E_exec[:iend - NiR]
         cols += [Pc, Ec]
-        fmt += "%.12f %.12f"
-    fmt += "\n"
+        decs += [12, 12]
 
-    flat = np.empty((N, len(cols) - 1))
-    for c, col in enumerate(cols[1:]):
+    flat = np.empty((N, len(cols)))
+    for c, col in enumerate(cols):
         flat[:, c] = col
-    # every row ends in "%.12f " except in the polar case ("%.12f" then newline)
-    data, ok = _format_table(flat, not P.Is_polar)
+    data, ok = _format_table(flat, np.array(decs, dtype=np.int64))
     if ok:
         body = data.tobytes()
     else:  # values too large / non-finite for the fast path
+        fmt = "%d " + "".join("%%.%df " % d for d in decs) + "\n"
         vals = np.column_stack([np.arange(N), flat]).ravel().tolist()
         for r in range(N):
-            vals[r * len(cols)] = r
+            vals[r * (len(cols) + 1)] = r
         body = ((fmt * N) % tuple(vals)).encode()
 
+    fact = 1. / (6.022e23 * P.sigma_nm ** 3 * 1000)
     footer = ["------------------\n%d x %d cycles time: %f s\n"
               % (P.Nbatch, sys.count_iter // P.Nbatch, elapsed)]
+    footer.append("".join("conc. of species %d :%.10f M; " % (i + 1, P.rhob[i] * fact)
+                          for i in range(Ns)) + "\n")
+    if P.ES_exists:
+        footer.append("Debye length:%.10f nm\n" % (debye_length(P) * 1e9))
     footer.append("".join("mu[%d] :%f; " % (i, sys.mu[i]) for i in range(Ns)) + "\n")
     if P.LG_exists:
         footer.append("h_target :%f; \n" % P.h_target)
@@ -200,7 +206,7 @@ def write_rho(sys, elapsed):
         footer.append("".join("eps[%d][%d] :%f; " % (i, j, P.eps[i, j])
                               for i in range(Ns) for j in range(i, Ns)) + "\n")
     footer.append("eps_r:%f\n" % sys.eps_r)
-    footer.append("".join("dev[%d] :%f; " % (i, sys.dev[i]) for i in range(Ns)) + "\n")
+    footer.append("".join("dev[%d] :%.12f; " % (i, sys.dev[i]) for i in range(len(sys.dev))) + "\n")
 
     tmp = sys.outfname + ".tmp"
     with open(tmp, "wb") as f:

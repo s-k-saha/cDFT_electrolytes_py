@@ -1,23 +1,20 @@
-"""Numerical helpers (utils.c): Poisson solvers and Langevin functions.
-
-All routines are numba-compiled; they are called once per Picard iteration.
-"""
+"""Numerical helpers (utils.c): Poisson solver, smoothing, Langevin functions."""
 import math
 
 import numpy as np
 from numba import njit
 
-BC_CODES = {"DD": 0, "DN": 1, "ND": 2, "NN": 3}
+BC_CODES = {"DD": 0, "DN": 1, "ND": 2}
 
 
 def poisson_factorize(h, Nt, bc):
     """LU factors of the (constant) tridiagonal Poisson matrix.
 
-    Returns an (4, M) array with rows a, c, m, bprime of the Thomas algorithm,
-    computed with exactly the same arithmetic as the C code so results agree
-    bit-for-bit; only the right-hand side has to be swept every iteration.
+    Returns a (4, M) array with rows a, c, m, bprime of the Thomas algorithm,
+    computed with the same arithmetic as the C code; only the right-hand side
+    has to be swept every iteration.
     """
-    M = Nt - 2
+    M = max(Nt - 2, 1)
     hh = h * h
     a = np.full(M, 1.0 / hh)
     b = np.full(M, -2.0 / hh)
@@ -38,46 +35,53 @@ def poisson_factorize(h, Nt, bc):
 
 
 @njit(cache=True, nogil=True)
-def poisson_1D(h, Nt, psi_left, psi_right, phi, psi, bc, thomas):
-    """Finite-difference Poisson equation psi'' = -phi, DD/DN/ND boundary conditions (Thomas).
+def poisson_1D(h, Nt, psi_left, psi_right, phi, psi, bc, thomas,
+               with_P, P, P_factor, Exec, sigma_nm):
+    """Solve psi'' = phi (+ P_factor * P') on Nt points (poisson_1D / poisson_1D_P).
 
-    NOTE: the C code (utils.c) solves psi'' = +phi here, while its NN solver
-    (psi_calculator) solves psi'' = -phi. The wrong sign makes like charges
-    attract, and the Picard iteration then diverges as soon as
-    4*pi*lambdaB_eff*sum(q^2 rho)*(L/pi)^2*alpha > ~1.  Fixed here.
+    bc: 0 = DD, 1 = DN (psi'(right) = psi_right), 2 = ND (psi'(left) = psi_left).
+    phi already carries the -e/(sigma*eps0) factor, so psi is in volts.
+    If with_P, P' uses central differences and the field E = -psi'/sigma_nm
+    (V/m) is written to Exec.
     """
     M = Nt - 2
     if M <= 0:
         psi[0] = psi_left
         psi[Nt - 1] = psi_right
+        if with_P and Nt == 2:
+            E = -(psi[1] - psi[0]) / h / sigma_nm
+            Exec[0] = E
+            Exec[1] = E
         return
     a = thomas[0]
     c = thomas[1]
     m = thomas[2]
     bprime = thomas[3]
     dprime = np.empty(M)
-    for i in range(M):
-        dprime[i] = -phi[i + 1]
+    if with_P:
+        for i in range(M):
+            j = i + 1
+            dprime[i] = phi[j] + (P[j + 1] - P[j - 1]) * P_factor / (2.0 * h)
+    else:
+        for i in range(M):
+            dprime[i] = phi[i + 1]
 
     if bc == 0:      # DD
         psi[0] = psi_left
         psi[Nt - 1] = psi_right
         dprime[0] -= a[0] * psi_left
         dprime[M - 1] -= c[M - 1] * psi_right
-    elif bc == 1:    # DN: psi'(right) = psi_right
+    elif bc == 1:    # DN
         psi[0] = psi_left
         dprime[0] -= a[0] * psi_left
-        dprime[M - 1] = -phi[Nt - 2] - psi_right / h
-    elif bc == 2:    # ND: psi'(left) = psi_left
+        dprime[M - 1] -= psi_right / h
+    else:            # ND
         psi[Nt - 1] = psi_right
-        dprime[0] = -phi[1] + psi_left / h
+        dprime[0] += psi_left / h
         dprime[M - 1] -= c[M - 1] * psi_right
-    else:
-        return
 
     for i in range(1, M):
         dprime[i] -= m[i] * dprime[i - 1]
-
     psi[Nt - 2] = dprime[M - 1] / bprime[M - 1]
     for i in range(M - 2, -1, -1):
         psi[i + 1] = (dprime[i] - c[i] * psi[i + 2]) / bprime[i]
@@ -87,38 +91,32 @@ def poisson_1D(h, Nt, psi_left, psi_right, phi, psi, bc, thomas):
     if bc == 2:
         psi[0] = psi[1] - h * psi_left
 
+    if with_P:
+        # electric field E = -dpsi/dx, second order everywhere
+        for j in range(1, Nt - 1):
+            Exec[j] = -(psi[j + 1] - psi[j - 1]) / (2.0 * h * sigma_nm)
+        if bc == 2:
+            Exec[0] = -psi_left
+        else:
+            Exec[0] = -(-3.0 * psi[0] + 4.0 * psi[1] - psi[2]) / (2.0 * h * sigma_nm)
+        if bc == 1:
+            Exec[Nt - 1] = -psi_right
+        else:
+            Exec[Nt - 1] = -(3.0 * psi[Nt - 1] - 4.0 * psi[Nt - 2] + psi[Nt - 3]) / (2.0 * h * sigma_nm)
+
 
 @njit(cache=True, nogil=True)
-def psi_calculator(h, Nt, psi_left, psi_right, phi, psi):
-    """Backward-sweep Poisson solver (NN, net-neutral systems)."""
-    M_end = 0.0
-    Q_end = 0.0
-    for i in range(Nt - 2, -1, -1):
-        x = h * i
-        Q_end += phi[i] * h
-        M_end += x * phi[i] * h
-        psi[i] = psi_right - (M_end - x * Q_end)
-    psi[Nt - 1] = psi_right
-
-
-@njit(cache=True, nogil=True)
-def psi_calculator_P(h, Nt, psi_left, psi_right, phi, psi, Eexec, P, lambdaB, P_factor):
-    """Backward-sweep Poisson solver with polarisation (trapezoidal quadrature)."""
-    M_end = 0.0
-    Q_end = 0.0
-    P_end = 0.0
-    for i in range(Nt - 2, -1, -1):
-        x_i = h * i
-        x_ip = h * (i + 1)
-        Q_end += 0.5 * h * (phi[i] + phi[i + 1])
-        M_end += 0.5 * h * (x_i * phi[i] + x_ip * phi[i + 1])
-        P_end += 0.5 * h * (P[i] + P[i + 1])
-        psi[i] = psi_right - (M_end - x_i * Q_end) - P_factor * P_end
-        Eexec[i] = -Q_end
-    for i in range(Nt - 2, -1, -1):
-        Eexec[i] = Eexec[i] - P[i] * P_factor
-    psi[Nt - 1] = psi_right
-    Eexec[Nt - 1] = 0.
+def smooth_3pt(inp, out):
+    """3-point binomial (0.25, 0.5, 0.25) smoothing; removes grid-scale noise in P."""
+    Nt = inp.shape[0]
+    if Nt <= 2:
+        for i in range(Nt):
+            out[i] = inp[i]
+        return
+    out[0] = inp[0]
+    out[Nt - 1] = inp[Nt - 1]
+    for i in range(1, Nt - 1):
+        out[i] = 0.25 * inp[i - 1] + 0.5 * inp[i] + 0.25 * inp[i + 1]
 
 
 @njit(cache=True, nogil=True)

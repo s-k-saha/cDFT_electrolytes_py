@@ -17,9 +17,11 @@ def main():
     ap.add_argument("--tol", type=float, default=None,
                     help="stop once max(dev) drops below this value")
     ap.add_argument("--workers", type=int, default=1, help="threads used by each FFT call")
+    ap.add_argument("--smooth-P", action="store_true",
+                    help="3-point smooth the polarisation before it enters Poisson's equation")
     args = ap.parse_args()
 
-    System(args.data_dir, workers=args.workers).run(max_batches=args.max_batches, tol=args.tol)
+    System(args.data_dir, workers=args.workers, smooth_P=args.smooth_P).run(max_batches=args.max_batches, tol=args.tol)
 
 
 if __name__ == "__main__":
