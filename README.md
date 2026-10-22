@@ -71,7 +71,20 @@ length, mu, eps, eps_r and dev). Restart files are interchangeable with
 `codebase_c_2`: if the output file exists, rho (and psi, P and E) are read from it and
 the iteration continues.
 
-The footer has one extra last line with the free-energy contributions of the
+The footer has two extra last lines. The first is the free-energy density of
+the bulk fluid at `rhob`, in kBT/sigma^3, computed once at startup
+(`free_energy.bulk_free_energy`):
+
+```text
+bulk free energy density (kBT/sigma^3): f_id :...; f_hs :...; [f_LJ :...;] f_tot :...; f_omega :...;
+```
+
+with `f_hs` the Percus-Yevick (= bulk Rosenfeld) excess, `f_LJ` =
+-alphaLJ/2 sum_ij eps_ij rhob_i rhob_j and `f_omega` = f_tot - sum_j mu_j rhob_j
+= -pressure. Electrostatics and dipole orientation do not contribute in the
+neutral, field-free bulk.
+
+The second line has the free-energy contributions of the
 current profiles (`cdft/free_energy.py`), recomputed at every write (every
 `Nbatch` iterations), as beta F/A in kBT/sigma^2 integrated over grid points
 `0 .. iend-1`:
@@ -92,6 +105,7 @@ functional whose derivative the solver uses in c1.
 ```text
 codebase_py/
 ├── run.py              # command-line entry point (replaces main.c)
+├── plot.py             # plot two columns of an output file (python plot.py --list)
 ├── cdft/
 │   ├── constants.py    # globals.c constants
 │   ├── params.py       # read_params_geometry / read_params_system

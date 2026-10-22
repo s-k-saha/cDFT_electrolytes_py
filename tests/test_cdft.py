@@ -87,7 +87,8 @@ def test_free_energy_terms(tmp_path):
     s.run(max_batches=5, verbose=False)
     P = s.P
     assert set(s.F) == {"id", "hs", "LJ", "ES", "ext", "tot", "Omega"}
-    assert "F_hs :" in open(s.outfname).read().splitlines()[-1]
+    footer = open(s.outfname).read().splitlines()
+    assert "F_hs :" in footer[-1] and "f_hs :" in footer[-2]
 
     # psi = exact Poisson solution of the current rho -> F_ES is stationary in psi
     phi = (P.q @ s.rho[:, P.NiR:P.iend]) * s.phi_factor
@@ -168,3 +169,27 @@ def test_neumann_boundary_is_kept(tmp_path):
             assert s.psi[-1] == VqR
             assert np.isclose((s.psi[1] - s.psi[0]) / P.dx, VqL, rtol=1e-9)
             assert np.isclose(s.E_tmp[0], -VqL / P.sigma_nm, rtol=1e-6)
+
+
+def test_bulk_free_energy():
+    """d f/d rhob_j = mu_j of the solver, and omega = -p (Percus-Yevick + mean-field LJ)."""
+    from cdft.free_energy import bulk_free_energy
+    from cdft.fmt import mu_HS
+    from cdft.lj import add_mu_LJ
+    from cdft.constants import ALPHA_LJ
+    rhob = np.array([0.6, 0.01, 0.02])
+    eps = np.array([[1., 0.8, 0.8], [0.8, 0., 0.], [0.8, 0., 0.]])
+    mu = mu_HS(rhob)
+    add_mu_LJ(mu, eps, rhob)
+    h = 1e-7
+    for j in range(3):
+        e = np.zeros(3)
+        e[j] = h
+        d = (bulk_free_energy(rhob + e, eps)["tot"] - bulk_free_energy(rhob - e, eps)["tot"]) / (2 * h)
+        assert np.isclose(d, mu[j], rtol=1e-7)
+    rho = rhob.sum()
+    eta = np.pi / 6 * rho
+    p = rho * (1 + eta + eta ** 2) / (1 - eta) ** 3 - 0.5 * ALPHA_LJ * rhob @ eps @ rhob
+    f = bulk_free_energy(rhob, eps)
+    assert np.isclose(f["omega"], -p, rtol=1e-6)
+    assert "LJ" not in bulk_free_energy(rhob)

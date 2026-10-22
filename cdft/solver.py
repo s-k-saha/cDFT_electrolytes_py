@@ -195,6 +195,7 @@ class System:
             lj.add_mu_LJ(self.mu, P.eps, P.rhob)
         self.eps_r = self._dielectric_constant()
         self.c1_bulk = -self.mu + np.log(P.rhob)
+        self.F_bulk = free_energy.bulk_free_energy(P.rhob, P.eps if P.LJ_exists else None)
 
         self.outfname = os.path.join(data_dir, io.create_outfname(P))
         found, cnt = io.read_restart(self.outfname, self.rho, P.N,

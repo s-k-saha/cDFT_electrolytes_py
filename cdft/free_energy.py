@@ -21,15 +21,19 @@ and every term below is the functional whose derivative the solver uses:
   ext     sum_j int rho_j Vext_j
 
 plus the total F and the grand potential Omega = F - sum_j mu_j N_j.
+
+bulk_free_energy gives the free-energy density (kBT/sigma^3) of the uniform
+bulk fluid at the densities rhob; the electrostatic and orientational terms
+vanish there (neutral bulk, psi' = 0).
 """
 import math
 
 import numpy as np
 from numba import njit
 
-from .constants import PI, EPSILON_0
+from .constants import PI, EPSILON_0, ALPHA_LJ
 from .utils import langevin, inv_langevin, smooth_3pt
-from . import fmt
+from . import fmt, lj
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +136,28 @@ def es_energy(rho, q, psi, P, is_polar, N_ES, NiR, dx, bc, Vq_L, Vq_R,
 
 
 # ---------------------------------------------------------------------------
+def bulk_free_energy(rhob, eps=None):
+    """Bulk free-energy density in kBT/sigma^3, consistent with fmt.mu_HS and lj.add_mu_LJ.
+
+    id   sum_j rhob_j (ln rhob_j - 1)
+    hs   rho [-ln(1-eta) + 3 eta (2-eta) / (2 (1-eta)^2)]   (Rosenfeld bulk = Percus-Yevick)
+    LJ   -alphaLJ/2 sum_ij eps_ij rhob_i rhob_j             (only if eps is given)
+    omega = f_tot - sum_j mu_j rhob_j = -p
+    """
+    rhob = np.asarray(rhob, dtype=float)
+    eta = float(fmt.get_eta(rhob))
+    f = {"id": float(np.sum(rhob * (np.log(rhob) - 1.))),
+         "hs": float(np.sum(rhob)) * (-math.log(1. - eta)
+                                      + 3. * eta * (2. - eta) / (2. * (1. - eta) ** 2))}
+    mu = fmt.mu_HS(rhob)
+    if eps is not None:
+        f["LJ"] = -0.5 * ALPHA_LJ * float(rhob @ eps @ rhob)
+        lj.add_mu_LJ(mu, eps, rhob)
+    f["tot"] = sum(f.values())
+    f["omega"] = f["tot"] - float(np.dot(mu, rhob))
+    return f
+
+
 def compute(sys):
     """Return a dict of the free-energy terms of ``sys`` (a solver.System), in kBT/sigma^2."""
     P = sys.P

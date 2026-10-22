@@ -210,6 +210,8 @@ def write_rho(sys, elapsed):
                               for i in range(Ns) for j in range(i, Ns)) + "\n")
     footer.append("eps_r:%f\n" % sys.eps_r)
     footer.append("".join("dev[%d] :%.12f; " % (i, sys.dev[i]) for i in range(len(sys.dev))) + "\n")
+    footer.append("bulk free energy density (kBT/sigma^3): "
+                  + "".join("f_%s :%.12f; " % kv for kv in sys.F_bulk.items()) + "\n")
     if sys.F is not None:
         footer.append("free energy (kBT/sigma^2): "
                       + "".join("F_%s :%.12f; " % kv for kv in sys.F.items()) + "\n")
