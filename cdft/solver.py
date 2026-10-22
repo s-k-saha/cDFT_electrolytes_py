@@ -198,7 +198,8 @@ class System:
 
         self.outfname = os.path.join(data_dir, io.create_outfname(P))
         found, cnt = io.read_restart(self.outfname, self.rho, P.N,
-                                     self.psi if P.ES_exists else None, P.NiR, P.iend)
+                                     self.psi if P.ES_exists else None, P.NiR, P.iend,
+                                     self.Pol if P.Is_polar else None, self.E_exec)
         if verbose:
             print("ouput file found,reading from it" if found else "no ouput file found")
         if cnt is not None:

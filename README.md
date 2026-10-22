@@ -68,7 +68,7 @@ The output file name and format are the same as `codebase_c_2`'s
 (`rho1Ddx...dat` with `rhob` printed to 12 decimals; columns
 `i x rho_1 c1_1 ... [psi rho_q] [P E]`; footer with concentrations, Debye
 length, mu, eps, eps_r and dev). Restart files are interchangeable with
-`codebase_c_2`: if the output file exists, rho (and psi) are read from it and
+`codebase_c_2`: if the output file exists, rho (and psi, P and E) are read from it and
 the iteration continues.
 
 The footer has one extra last line with the free-energy contributions of the
@@ -162,6 +162,12 @@ and Python 2.5 s.
   the sign of the vector terms and makes c1 inconsistent with the Rosenfeld
   functional near walls (bulk results are unaffected). Profiles near a wall
   therefore differ from the C code.
+* With DN/ND, the Neumann end of psi is kept at psi' = Vq after mixing; C_2
+  overwrote it with the field value Vq. The boundary field E there is
+  -Vq/sigma (V/m); C_2 wrote -Vq (V/sigma).
+* Polar restart: rho_0 at the wall is printed as 0, which made C_2's
+  orientational term divide 0 by 0. It is skipped where rho_0 = 0, and P and E
+  are read back from the file as well.
 * Without charges, C_2 crashes when writing the Debye length. Here that footer
   line is simply omitted. `Is_polar=1` without a `q=` line, or BC = NN or an
   unknown BC, stops with an error.

@@ -96,11 +96,11 @@ def poisson_1D(h, Nt, psi_left, psi_right, phi, psi, bc, thomas,
         for j in range(1, Nt - 1):
             Exec[j] = -(psi[j + 1] - psi[j - 1]) / (2.0 * h * sigma_nm)
         if bc == 2:
-            Exec[0] = -psi_left
+            Exec[0] = -psi_left / sigma_nm
         else:
             Exec[0] = -(-3.0 * psi[0] + 4.0 * psi[1] - psi[2]) / (2.0 * h * sigma_nm)
         if bc == 1:
-            Exec[Nt - 1] = -psi_right
+            Exec[Nt - 1] = -psi_right / sigma_nm
         else:
             Exec[Nt - 1] = -(3.0 * psi[Nt - 1] - 4.0 * psi[Nt - 2] + psi[Nt - 3]) / (2.0 * h * sigma_nm)
 

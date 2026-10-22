@@ -76,8 +76,14 @@ def add_c1_ES(rho, c1, q, dx, N_ES, Vq_L, Vq_R, bc, thomas, is_polar, smooth_P,
     # potential (and field) mixing
     for i in range(N_ES):
         psi[i] = alpha_ES * psi_tmp[i] + (1 - alpha_ES) * psi[i]
-    psi[0] = Vq_L
-    psi[N_ES - 1] = Vq_R
+    if bc == 2:      # ND: psi'(left) = Vq_L (V/sigma)
+        psi[0] = psi[1] - dx * Vq_L
+    else:
+        psi[0] = Vq_L
+    if bc == 1:      # DN: psi'(right) = Vq_R (V/sigma)
+        psi[N_ES - 1] = psi[N_ES - 2] + dx * Vq_R
+    else:
+        psi[N_ES - 1] = Vq_R
     if is_polar:
         for i in range(N_ES):
             E_exec[i] = alpha_ES * E_tmp[i] + (1 - alpha_ES) * E_exec[i]
@@ -89,6 +95,8 @@ def add_c1_ES(rho, c1, q, dx, N_ES, Vq_L, Vq_R, bc, thomas, is_polar, smooth_P,
     # ideal (orientational) contribution of the dipolar solvent, species 0
     if is_polar:
         for j in range(NiR, iend):
+            if rho[0, j] <= 0.:
+                continue  # no solvent (e.g. rho_0 read back as 0 on restart): no entropy term
             temp = inv_langevin(P[j - NiR] / (p * rho[0, j]))
             if math.fabs(temp) <= 1.0e-8:
                 c1[0, j] -= -math.log(1. + temp * temp / 6.)

@@ -127,3 +127,44 @@ def test_free_energy_terms(tmp_path):
         Fm = fe.compute(s)["ES"]
         s.psi[k] += 1e-4
         assert abs(Fp - Fm) < 1e-8 * abs(F0)
+
+
+def _polar_case(path, bc="DD", VqL=0.05, VqR=0.0):
+    (path / "params_geometry.txt").write_text(
+        "Nspecies=3\nN=2000\nR=0.5\ndx=0.01\nalpha=0.01\nNbatch=10\nIs_polar=1\n")
+    (path / "params_system.txt").write_text(
+        "T=300\new=[1.2,0.0,0.0]\nrhob=[0.6,0.01,0.01]\neps=[1.,0.8,0.8,0.8,0,0,0.8,0,0]\n"
+        "alpha_ES=0.003\nq=[0.,1.,-1.]\nBC=%s\nVq_L=%r\nVq_R=%r\np=17.31\n" % (bc, VqL, VqR))
+
+
+def test_polar_restart(tmp_path):
+    """rho_0 near the wall is written as 0: restarting must not divide by it, and P, E carry over."""
+    _polar_case(tmp_path)
+    s = System(str(tmp_path), verbose=False)
+    s.run(max_batches=3, verbose=False)
+    s2 = System(str(tmp_path), verbose=False)
+    assert s2.count_iter == s.count_iter
+    assert np.allclose(s2.Pol, s.Pol, atol=1e-12)
+    assert np.allclose(s2.E_exec, s.E_exec, atol=1e-6 * np.abs(s.E_exec).max())
+    s2.run(max_batches=1, verbose=False)
+    assert np.isfinite(s2.dev).all()
+    assert s2.dev.max() < 2 * s.dev.max()  # continues instead of restarting from P = E = 0
+
+
+def test_neumann_boundary_is_kept(tmp_path):
+    """With DN/ND the Neumann end of psi obeys psi' = Vq (V/sigma) instead of being set to Vq."""
+    for bc, VqL, VqR in (("DN", 0.05, 0.001), ("ND", 0.002, 0.0)):
+        d = tmp_path / bc
+        d.mkdir()
+        _polar_case(d, bc, VqL, VqR)
+        s = System(str(d), verbose=False)
+        s.run(max_batches=2, verbose=False)
+        P = s.P
+        if bc == "DN":
+            assert s.psi[0] == VqL
+            assert np.isclose((s.psi[-1] - s.psi[-2]) / P.dx, VqR, rtol=1e-9)
+            assert np.isclose(s.E_tmp[-1], -VqR / P.sigma_nm, rtol=1e-6)
+        else:
+            assert s.psi[-1] == VqR
+            assert np.isclose((s.psi[1] - s.psi[0]) / P.dx, VqL, rtol=1e-9)
+            assert np.isclose(s.E_tmp[0], -VqL / P.sigma_nm, rtol=1e-6)

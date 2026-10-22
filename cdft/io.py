@@ -125,8 +125,8 @@ def create_outfname(P):
 _CYCLES = re.compile(r"(-?\d+) x (-?\d+) cycles time:\s*\S+ s")
 
 
-def read_restart(fname, rho, N, psi=None, NiR=0, iend=0):
-    """Load rho (and psi, if given) from an existing output file.
+def read_restart(fname, rho, N, psi=None, NiR=0, iend=0, Pol=None, E=None):
+    """Load rho (and psi, P, E, if given) from an existing output file.
 
     Returns (found, ncycles or None).
     """
@@ -148,6 +148,9 @@ def read_restart(fname, rho, N, psi=None, NiR=0, iend=0):
                 rho[s, i] = float(tok[2 + 2 * s])
             if psi is not None and NiR <= i < iend and len(tok) > 2 + 2 * Ns:
                 psi[i - NiR] = float(tok[2 + 2 * Ns])
+            if Pol is not None and NiR <= i < iend and len(tok) > 5 + 2 * Ns:
+                Pol[i - NiR] = float(tok[4 + 2 * Ns])
+                E[i - NiR] = float(tok[5 + 2 * Ns])
         for line in lines:
             m = _CYCLES.match(line)
             if m:
