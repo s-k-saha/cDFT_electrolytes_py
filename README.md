@@ -71,6 +71,22 @@ length, mu, eps, eps_r and dev). Restart files are interchangeable with
 `codebase_c_2`: if the output file exists, rho (and psi) are read from it and
 the iteration continues.
 
+The footer has one extra last line with the free-energy contributions of the
+current profiles (`cdft/free_energy.py`), recomputed at every write (every
+`Nbatch` iterations), as beta F/A in kBT/sigma^2 integrated over grid points
+`0 .. iend-1`:
+
+```text
+free energy (kBT/sigma^2): F_id :...; [F_orient :...;] F_hs :...; [F_LJ :...;] [F_ES :...;] F_ext :...; F_tot :...; F_Omega :...;
+```
+
+`id` = sum_j int rho_j(ln rho_j - 1), `orient` = orientational entropy of the
+Langevin dipoles (polar only), `hs` = Rosenfeld FMT, `LJ` = mean-field
+attraction, `ES` = max_psi [int rho_eff psi - eps0/2 int psi'^2] (+ Neumann
+boundary terms) with rho_eff = sum_j q_j e rho_j - P', `ext` = sum_j int rho_j Vext_j,
+`tot` = their sum and `Omega` = F_tot - sum_j mu_j N_j. Each term is the
+functional whose derivative the solver uses in c1.
+
 ## Layout
 
 ```text
@@ -84,6 +100,7 @@ codebase_py/
 │   ├── es.py           # functional_ES.c
 │   ├── utils.py        # utils.c (Poisson solvers, Langevin functions)
 │   ├── solver.py       # init.c + iterator.c (System class, Picard iteration)
+│   ├── free_energy.py  # free-energy contributions written in the footer
 │   └── io.py           # output file name, writer, restart reader
 ├── data/               # params_geometry.txt, params_system.txt, outputs
 └── tests/              # python -m pytest tests
@@ -140,6 +157,11 @@ and Python 2.5 s.
   if species 1 is an anion.
 * Polar + liquid-gas: C_2 updates `P[i]` instead of `P[i-NiR]` in that branch
   (out-of-bounds write); fixed here.
+* FMT c1: the back-convolution with the vector weights n1v, n2v uses the
+  mirrored weights (conj(W) in Fourier space). The C code uses W, which flips
+  the sign of the vector terms and makes c1 inconsistent with the Rosenfeld
+  functional near walls (bulk results are unaffected). Profiles near a wall
+  therefore differ from the C code.
 * Without charges, C_2 crashes when writing the Debye length. Here that footer
   line is simply omitted. `Is_polar=1` without a `q=` line, or BC = NN or an
   unknown BC, stops with an error.

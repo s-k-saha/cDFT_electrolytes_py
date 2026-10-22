@@ -24,7 +24,7 @@ from numba import njit
 from .constants import ELECTRON_CHARGE, EPSILON_0, P_D
 from .params import read_params
 from .utils import BC_CODES, langevin, poisson_factorize
-from . import fmt, lj, es, io
+from . import fmt, lj, es, io, free_energy
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +56,17 @@ def truncate_rho(rho, NiLJ, out):
 def c1_hat(D, W, Uhat, eps, RH, use_lj, out):
     """Fourier transform of c1 for every species.
 
-    out[s,k] = -sum_a D[a,k] W[a,k] - Uhat[k] * sum_j eps[s,j] RH[j,k]
+    out[s,k] = -sum_a D[a,k] conj(W[a,k]) - Uhat[k] * sum_j eps[s,j] RH[j,k]
+
+    c1 needs the mirrored weights w_a(-x), i.e. conj(W) in Fourier space; this
+    flips the sign of the odd (vector) weights n1v, n2v.
     """
     Ns = out.shape[0]
     K = out.shape[1]
     for k in range(K):
         f = 0j
         for a in range(W.shape[0]):
-            f -= D[a, k] * W[a, k]
+            f -= D[a, k] * W[a, k].conjugate()
         for s in range(Ns):
             v = f
             if use_lj:
@@ -143,6 +146,7 @@ class System:
         self.c1 = np.zeros((Ns, N))
         self.dev = np.zeros(Ns + 1 if P.Is_polar else Ns)  # last entry: P(x)
         self.count_iter = 0
+        self.F = None  # free-energy terms, updated at every write
 
         # work buffers
         self.rhocopy = np.zeros(N)
@@ -298,6 +302,7 @@ class System:
             print("conc. of species %d = %f M" % (i + 1, P.rhob[i] * fact))
 
     def write(self, elapsed):
+        self.F = free_energy.compute(self)
         io.write_rho(self, elapsed)
 
     def run(self, max_batches=None, tol=None, verbose=True):

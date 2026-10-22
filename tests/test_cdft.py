@@ -62,3 +62,68 @@ def test_bulk_fluid_is_a_fixed_point(tmp_path):
     assert np.allclose(s.rho[0, mid], 0.2, rtol=1e-5)  # grid vs analytic bulk mu
     assert np.allclose(s.rho[1, mid], 0.1, rtol=1e-5)  # grid vs analytic bulk mu
     assert os.path.exists(s.outfname)
+
+
+def test_free_energy_terms(tmp_path):
+    """Bulk Rosenfeld = PY free energy; id/LJ/ES/ext derivatives match the solver's c1."""
+    from cdft import free_energy as fe
+    from cdft.fmt import fmt_omegas, fmt_dphidn, weight_products
+    from cdft.solver import truncate_rho, rhocpy, c1_hat
+    from cdft.utils import poisson_1D
+
+    W = fmt_omegas(0.5, 10.0, 4)
+    rho = 0.7
+    eta = np.pi / 6 * rho
+    n = np.repeat((W[:, 0].real * rho)[:, None], 10, axis=1)
+    ref = rho * (-np.log(1 - eta) + 3 * eta * (2 - eta) / (2 * (1 - eta) ** 2))
+    assert np.isclose(fe.fmt_phi(n, 10, 0.1), ref, rtol=1e-6)
+
+    (tmp_path / "params_geometry.txt").write_text(
+        "Nspecies=3\nN=2000\nR=0.5\ndx=0.01\nalpha=0.01\nNbatch=10\nIs_polar=0\n")
+    (tmp_path / "params_system.txt").write_text(
+        "T=300\new=[1.2,0.0,0.0]\nrhob=[0.6,0.01,0.01]\neps=[1.,0.8,0.8,0.8,0,0,0.8,0,0]\n"
+        "alpha_ES=0.003\nq=[0.,1.,-1.]\nBC=DD\nVq_L=0.05\nVq_R=0.0\n")
+    s = System(str(tmp_path), verbose=False)
+    s.run(max_batches=5, verbose=False)
+    P = s.P
+    assert set(s.F) == {"id", "hs", "LJ", "ES", "ext", "tot", "Omega"}
+    assert "F_hs :" in open(s.outfname).read().splitlines()[-1]
+
+    # psi = exact Poisson solution of the current rho -> F_ES is stationary in psi
+    phi = (P.q @ s.rho[:, P.NiR:P.iend]) * s.phi_factor
+    poisson_1D(P.dx, P.N_ES, P.Vq_L, P.Vq_R, phi, s.psi, s.bc, s.thomas,
+               False, s.Pol, 0.0, s.E_tmp, P.sigma_nm)
+    truncate_rho(s.rho, P.NiLJ, s.rhotrunc)
+    s._rfft(s.rhotrunc, s.RH)
+    c1_lj = s._irfft(-s.Uhat * (P.eps @ s.RH), np.zeros((3, P.N)))
+    # FMT part of the solver's c1 for the current rho
+    rhocpy(s.rho, P.NiR, s.rhocopy)
+    s._rfft(s.rhocopy, s.Rh)
+    weight_products(s.Rh, s.W, s.nhat)
+    s._irfft(s.nhat, s.n)
+    fmt_dphidn(s.n, s.dphi)
+    s._rfft(s.dphi, s.D)
+    c1_hat(s.D, s.W, s.Uhat, P.eps, s.RH, False, s.c1h)
+    c1_hs = s._irfft(s.c1h, np.zeros((3, P.N)))
+    for j, i in [(0, 100), (0, 300), (1, 700), (2, 1000)]:
+        r0 = s.rho[j, i]
+        h = 1e-6
+        s.rho[j, i] = r0 + h
+        Fp = fe.compute(s)
+        s.rho[j, i] = r0 - h
+        Fm = fe.compute(s)
+        s.rho[j, i] = r0
+        d = {k: (Fp[k] - Fm[k]) / (2 * h * P.dx) for k in Fp}
+        assert np.isclose(d["hs"], -c1_hs[j, i], rtol=1e-6)
+        assert np.isclose(d["id"], np.log(r0), atol=1e-6)
+        assert np.isclose(d["ext"], s.Vext[j, i], atol=1e-6)
+        assert np.isclose(d["LJ"], -c1_lj[j, i], rtol=1e-6)
+        assert np.isclose(d["ES"], P.q[j] * s.psi[i - P.NiR] * s.e_kBT, rtol=1e-5, atol=1e-9)
+    F0 = fe.compute(s)["ES"]
+    for k in (100, 600):
+        s.psi[k] += 1e-4
+        Fp = fe.compute(s)["ES"]
+        s.psi[k] -= 2e-4
+        Fm = fe.compute(s)["ES"]
+        s.psi[k] += 1e-4
+        assert abs(Fp - Fm) < 1e-8 * abs(F0)
